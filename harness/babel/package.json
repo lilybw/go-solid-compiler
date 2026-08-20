@@ -1,0 +1,13 @@
+{
+  "name": "go-solid-compiler-reference",
+  "private": true,
+  "type": "module",
+  "description": "Produces reference output from babel-preset-solid for the differential harness. Used only in CI and when re-recording goldens; never at build or run time.",
+  "scripts": {
+    "record": "node transform.mjs"
+  },
+  "dependencies": {
+    "@babel/core": "7.29.7",
+    "babel-preset-solid": "1.9.12"
+  }
+}

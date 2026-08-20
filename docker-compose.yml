@@ -1,0 +1,216 @@
+# Task runner for go-solid-compiler.
+#
+# Every command below behaves identically on Windows, macOS, and Linux, and is
+# the same environment CI uses:
+#
+#   docker compose build               build the image (do this first)
+#   docker compose run --rm setup      one-time: fetch deps, vendor runtime
+#   docker compose run --rm check      gofmt, vet, and tests
+#   docker compose run --rm test       full test suite
+#   docker compose run --rm fmt        rewrite files with the container gofmt
+#   docker compose run --rm doctor     verify the cache volumes are writable
+#   docker compose run --rm record     re-record the differential goldens
+#   docker compose run --rm vendor     fetch the embedded solid-js runtime
+#   docker compose run --rm deps       update the TypeScript compiler fork
+#   docker compose run --rm shell      interactive shell
+#
+# Caches live in named volumes rather than bind mounts. That is a deliberate
+# choice for Windows and macOS, where bind-mounted directories with hundreds of
+# thousands of small files - which is exactly what a Go module cache is - are
+# slow enough to dominate the run time.
+
+# Only the `base` service below declares `build`. Every other service reuses
+# the image it produces.
+#
+# This matters more than it looks. When several services each declare a build
+# that writes the same `image:` tag, `docker compose build` runs them as
+# parallel bake targets that all export to that one name, and they race:
+#
+#   target test: failed to solve: image "...:1.27rc3": already exists
+#
+# One build definition means one exporter and no race. The cost is that the
+# image must exist before `run` works, so `docker compose build` comes first.
+x-common: &common
+  image: go-solid-compiler-dev:${GO_VERSION:-1.27rc3}
+  # Never reach for a registry: this image is built locally and named locally.
+  # Without this, a missing image reports as an authentication failure against
+  # Docker Hub, which sends you looking in entirely the wrong place.
+  pull_policy: never
+  # Every target below must also be created, and chowned, in the Dockerfile.
+  # A named volume inherits ownership from the image at its mount path, so a
+  # target the image does not create ends up root-owned and unwritable.
+  volumes:
+    - .:/workspace
+    - gomod:/go/pkg/mod
+    - gocache:/go/cache
+    - nodemod:/workspace/harness/babel/node_modules
+  working_dir: /workspace
+  environment:
+    # Fail fast rather than silently downloading a different toolchain than the
+    # image pins: the image is supposed to be the single definition of the
+    # environment.
+    GOTOOLCHAIN: local
+    GOFLAGS: -buildvcs=false
+
+services:
+  # The one service that builds. Not meant to be run directly; `docker compose
+  # build` picks it up because it is the only build definition present.
+  base:
+    image: go-solid-compiler-dev:${GO_VERSION:-1.27rc3}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Set these in .env (copy .env.example) rather than per command.
+        # Compose reads .env for every invocation, so build and run agree on
+        # the image tag; exporting the variable for `build` alone leaves `run`
+        # looking for a differently tagged image and rebuilding.
+        GO_VERSION: ${GO_VERSION:-1.27rc3}
+        NODE_MAJOR: ${NODE_MAJOR:-22}
+        # On Linux, set these in .env so generated files are owned by you. Note
+        # that bash defines UID as a shell variable but does not export it, so
+        # Compose will not see it unless .env supplies it explicitly.
+        # Docker Desktop remaps ownership itself, so this is a no-op there.
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    command: ["true"]
+
+  # Everything a fresh checkout needs before the test suite will run.
+  #
+  # The TypeScript compiler fork is not vendored, so go.mod carries no
+  # requirement for it until this runs; the embedded solid-js runtime is
+  # generated rather than committed for the same reason.
+  setup:
+    <<: *common
+    command: >
+      bash -euo pipefail -c '
+        echo "== fetching the TypeScript compiler fork ==";
+        go get github.com/Zzzen/typescript-go@main;
+        go mod tidy;
+        echo "== repairing the fork'"'"'s missing locale assets ==";
+        bash scripts/patch-tsgo-loc.sh;
+        echo "== vendoring the solid-js runtime ==";
+        go generate ./runtime || echo "(runtime vendoring skipped)";
+        echo;
+        echo "setup complete; run: docker compose run --rm check";
+      '
+
+  # What CI gates on.
+  check:
+    <<: *common
+    command: >
+      bash -euo pipefail -c '
+        echo "== gofmt ==";
+        unformatted="$$(gofmt -l .)";
+        if [ -n "$$unformatted" ]; then
+          echo "needs gofmt:"; echo "$$unformatted"; echo;
+          gofmt -d .;
+          echo;
+          echo "fix with: docker compose run --rm fmt";
+          exit 1;
+        fi;
+        echo "== vet ==";
+        go vet ./...;
+        echo "== test ==";
+        go test -race -count=1 ./...;
+      '
+
+  # Full suite with the race detector. The compiler is meant to run inside an
+  # esbuild plugin, which esbuild invokes concurrently across files, so races
+  # are a real risk rather than a theoretical one.
+  test:
+    <<: *common
+    command: go test -race -count=1 ./...
+
+  # Rewrite files with the container toolchain rather than the host one.
+  #
+  # gofmt output can differ between Go releases, so the formatting that counts
+  # is whichever version CI runs - which is this image, by construction.
+  # Formatting on the host with a different Go can produce a diff the container
+  # then rejects.
+  fmt:
+    <<: *common
+    command: >
+      bash -euo pipefail -c '
+        gofmt -l -w .;
+        echo "formatted with $$(go version)";
+      '
+
+  # Verifies that image and compose agree about volume mount points. Cheap, and
+  # it fails with the fix rather than as a permission error mid-build.
+  doctor:
+    <<: *common
+    command: >
+      bash -euo pipefail -c '
+        status=0;
+        for d in /go/pkg/mod /go/cache /workspace/harness/babel/node_modules; do
+          if [ ! -w "$$d" ]; then
+            echo "NOT WRITABLE: $$d ($$(stat -c %U:%G "$$d" 2>/dev/null || echo missing))";
+            status=1;
+          else
+            echo "ok: $$d";
+          fi;
+        done;
+        if [ "$$status" -ne 0 ]; then
+          echo;
+          echo "Discard the stale volumes and rebuild:";
+          echo "  docker compose down -v && docker compose build";
+          exit 1;
+        fi;
+        go version; node --version;
+        echo;
+        if go list -m github.com/Zzzen/typescript-go >/dev/null 2>&1; then
+          d="$$(go list -m -f "{{.Dir}}" github.com/Zzzen/typescript-go)";
+          if [ -d "$$d/use-at-your-own-risk/diagnostics/loc" ]; then
+            echo "ok: typescript-go locale assets present";
+          else
+            echo "MISSING: typescript-go locale assets";
+            echo "  fix with: docker compose run --rm setup";
+            exit 1;
+          fi;
+        else
+          echo "note: typescript-go not fetched yet (run setup)";
+        fi;
+      '
+
+  # Re-derive the differential goldens from babel-preset-solid. This is the
+  # only task that needs Node, and it answers a different question from the
+  # test suite: not "did we regress" but "did the reference change".
+  record:
+    <<: *common
+    command: >
+      bash -euo pipefail -c '
+        npm --prefix harness/babel ci || npm --prefix harness/babel install;
+        npm --prefix harness/babel run record;
+      '
+
+  # Populate the embedded solid-js runtime.
+  vendor:
+    <<: *common
+    command: go generate ./runtime
+
+  # Fetch or update the TypeScript compiler fork.
+  #
+  # @main, not @latest. The fork carries a v0.0.1 tag from March 2025, and
+  # @latest resolves to the highest tagged version - so it would pin a year-old
+  # snapshot predating the JSX transform entirely. The useful code is on the
+  # default branch, which a scheduled action keeps in sync with upstream, and
+  # Go records it as a pseudo-version in go.mod.
+  deps:
+    <<: *common
+    command: >
+      bash -euo pipefail -c '
+        go get github.com/Zzzen/typescript-go@main;
+        go mod tidy;
+      '
+
+  shell:
+    <<: *common
+    command: bash
+    stdin_open: true
+    tty: true
+
+volumes:
+  gomod:
+  gocache:
+  nodemod:

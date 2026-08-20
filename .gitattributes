@@ -1,2 +1,45 @@
-# Auto detect text files and perform LF normalization
+# Line-ending policy.
+#
+# This repository is developed on Windows and built inside a Linux container,
+# which is the exact situation where CRLF causes trouble that is hard to read
+# from the error message.
+#
+# Two concrete failures this prevents:
+#
+#   1. A shell script checked out with CRLF fails inside the container with
+#      "bad interpreter: /usr/bin/env bash^M: no such file or directory", or
+#      silently misbehaves when a trailing ^M lands in a variable.
+#
+#   2. A patch generated on LF will not apply to a CRLF working copy, because
+#      the context lines do not match byte for byte. That failure reports as
+#      "patch does not apply" with no hint that line endings are the cause.
+#
+# Everything textual is normalized to LF in the repository. Git still checks
+# out whatever the platform prefers for files not pinned below, but the ones
+# that must be LF are pinned explicitly.
+
 * text=auto
+
+# Must be LF: executed by the container's shell.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# Must be LF: gofmt emits LF, so anything else produces a permanent diff.
+*.go            text eol=lf
+go.mod          text eol=lf
+go.sum          text eol=lf
+
+# Generated and compared byte for byte by the differential harness.
+*.tsx           text eol=lf
+*.js            text eol=lf
+*.mjs           text eol=lf
+*.json          text eol=lf
+
+# Patches carry their own line endings; rewriting them breaks application.
+*.patch         -text
+*.diff          -text
+
+# PowerShell is happier with CRLF and never runs in the container.
+*.ps1           text eol=crlf

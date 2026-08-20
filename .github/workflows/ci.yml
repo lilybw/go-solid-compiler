@@ -1,0 +1,146 @@
+# Continuous integration for go-solid-compiler.
+#
+# Every job runs inside the same image described by ./Dockerfile, which is also
+# what `docker compose run --rm check` uses locally. That is the point: a green
+# pipeline and a green checkout mean the same thing, rather than differing by
+# whichever Go and Node happen to be installed on the runner.
+#
+# Two questions are asked separately:
+#
+#   check         did we regress against the recorded reference output?
+#   reference     did babel-preset-solid change under us?
+#
+# The first gates merges and needs no network beyond the module cache. The
+# second is slower and runs on a schedule, because upstream changing is not
+# something a pull request causes.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, to catch reference implementation drift.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Bump to a prerelease to try generic methods before Go 1.27 ships, e.g.
+  # 1.27rc3. go.mod stays at 1.26 either way; the generic-method files opt in
+  # through //go:build constraints.
+  GO_VERSION: "1.26"
+
+jobs:
+  check:
+    name: check (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The released toolchain gates merges. Add a prerelease here to see the
+        # generic-method files actually compile:
+        #   go: ["1.26", "1.27rc3"]
+        go: ["1.26"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the dev image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: go-solid-compiler-dev:${{ matrix.go }}
+          build-args: |
+            GO_VERSION=${{ matrix.go }}
+          # Cache layers in the Actions cache so the apt and toolchain layers
+          # are not rebuilt on every run.
+          cache-from: type=gha,scope=dev-${{ matrix.go }}
+          cache-to: type=gha,mode=max,scope=dev-${{ matrix.go }}
+
+      - name: Cache Go modules and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/gomod
+            .cache/gobuild
+          key: go-${{ matrix.go }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-${{ matrix.go }}-
+
+      - name: Vendor the embedded solid-js runtime
+        # The embedded runtime is generated rather than committed, so it has to
+        # exist before the build. Non-fatal: the compiler itself does not need
+        # it, only a consumer bundling an app does.
+        run: ./ci-run.sh ${{ matrix.go }} "go generate ./runtime || echo 'runtime vendoring skipped'"
+
+      - name: Check formatting
+        run: ./ci-run.sh ${{ matrix.go }} 'unformatted="$(gofmt -l .)"; if [ -n "$unformatted" ]; then echo "needs gofmt:"; echo "$unformatted"; exit 1; fi'
+
+      - name: Vet
+        run: ./ci-run.sh ${{ matrix.go }} "go vet ./..."
+
+      - name: Test
+        run: ./ci-run.sh ${{ matrix.go }} "go test -race -count=1 ./..."
+
+      - name: Differential harness
+        # -v so a divergence names the fixture and the category in the log,
+        # without needing a local reproduction.
+        run: ./ci-run.sh ${{ matrix.go }} "go test -v -count=1 ./harness/..."
+
+  reference:
+    name: reference drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the dev image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: go-solid-compiler-dev:${{ env.GO_VERSION }}
+          build-args: |
+            GO_VERSION=${{ env.GO_VERSION }}
+          cache-from: type=gha,scope=dev-${{ env.GO_VERSION }}
+
+      - name: Re-record goldens from babel-preset-solid
+        run: ./ci-run.sh ${{ env.GO_VERSION }} "npm --prefix harness/babel ci || npm --prefix harness/babel install; npm --prefix harness/babel run record"
+
+      - name: Fail if the reference output drifted
+        run: |
+          if ! git diff --quiet -- harness/testdata/expected; then
+            echo "::error::babel-preset-solid now produces different output."
+            echo "The committed goldens are stale. Review the diff, then commit"
+            echo "the re-recorded files if the change is expected."
+            echo
+            git --no-pager diff -- harness/testdata/expected
+            exit 1
+          fi
+          echo "goldens match the reference implementation"
+
+      - name: Summarize
+        if: always()
+        run: |
+          fixtures=$(ls harness/testdata/corpus/*.tsx 2>/dev/null | wc -l)
+          goldens=$(ls harness/testdata/expected/*.js 2>/dev/null | wc -l)
+          {
+            echo "### Differential harness"
+            echo
+            echo "| | count |"
+            echo "|---|---|"
+            echo "| fixtures | $fixtures |"
+            echo "| recorded goldens | $goldens |"
+          } >> "$GITHUB_STEP_SUMMARY"

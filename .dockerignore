@@ -1,0 +1,4 @@
+.git/
+.github/
+harness/babel/node_modules/
+*.tar.gz
