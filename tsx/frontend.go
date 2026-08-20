@@ -8,7 +8,7 @@
 //   - [Frontend] implements [parse.Frontend], converting the type-level
 //     subset into this library's canonical AST for generation.
 //
-// This package depends on github.com/Zzzen/typescript-go, a fork that
+// This package depends on github.com/lilybw/typescript-go, a fork that
 // re-exports the compiler internals. Pin it to an exact version.
 package tsx
 
@@ -16,11 +16,11 @@ import (
 	"fmt"
 	"strings"
 
-	tsast "github.com/Zzzen/typescript-go/use-at-your-own-risk/ast"
-	tscore "github.com/Zzzen/typescript-go/use-at-your-own-risk/core"
-	tslocale "github.com/Zzzen/typescript-go/use-at-your-own-risk/locale"
-	tsparser "github.com/Zzzen/typescript-go/use-at-your-own-risk/parser"
-	tspath "github.com/Zzzen/typescript-go/use-at-your-own-risk/tspath"
+	tsast "github.com/lilybw/typescript-go/use-at-your-own-risk/ast"
+	tscore "github.com/lilybw/typescript-go/use-at-your-own-risk/core"
+	tslocale "github.com/lilybw/typescript-go/use-at-your-own-risk/locale"
+	tsparser "github.com/lilybw/typescript-go/use-at-your-own-risk/parser"
+	tspath "github.com/lilybw/typescript-go/use-at-your-own-risk/tspath"
 
 	"github.com/lilybw/go-solid-compiler/ast"
 	"github.com/lilybw/go-solid-compiler/parse"

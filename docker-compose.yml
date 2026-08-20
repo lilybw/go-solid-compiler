@@ -85,10 +85,8 @@ services:
     command: >
       bash -euo pipefail -c '
         echo "== fetching the TypeScript compiler fork ==";
-        go get github.com/Zzzen/typescript-go@main;
+        go get github.com/lilybw/typescript-go@latest;
         go mod tidy;
-        echo "== repairing the fork'"'"'s missing locale assets ==";
-        bash scripts/patch-tsgo-loc.sh;
         echo "== vendoring the solid-js runtime ==";
         go generate ./runtime || echo "(runtime vendoring skipped)";
         echo;
@@ -158,19 +156,6 @@ services:
           exit 1;
         fi;
         go version; node --version;
-        echo;
-        if go list -m github.com/Zzzen/typescript-go >/dev/null 2>&1; then
-          d="$$(go list -m -f "{{.Dir}}" github.com/Zzzen/typescript-go)";
-          if [ -d "$$d/use-at-your-own-risk/diagnostics/loc" ]; then
-            echo "ok: typescript-go locale assets present";
-          else
-            echo "MISSING: typescript-go locale assets";
-            echo "  fix with: docker compose run --rm setup";
-            exit 1;
-          fi;
-        else
-          echo "note: typescript-go not fetched yet (run setup)";
-        fi;
       '
 
   # Re-derive the differential goldens from babel-preset-solid. This is the
@@ -191,16 +176,13 @@ services:
 
   # Fetch or update the TypeScript compiler fork.
   #
-  # @main, not @latest. The fork carries a v0.0.1 tag from March 2025, and
-  # @latest resolves to the highest tagged version - so it would pin a year-old
-  # snapshot predating the JSX transform entirely. The useful code is on the
-  # default branch, which a scheduled action keeps in sync with upstream, and
-  # Go records it as a pseudo-version in go.mod.
+  # Pinned to a tagged release of the fork, which a scheduled action keeps in
+  # sync with upstream and verifies before publishing.
   deps:
     <<: *common
     command: >
       bash -euo pipefail -c '
-        go get github.com/Zzzen/typescript-go@main;
+        go get github.com/lilybw/typescript-go@latest;
         go mod tidy;
       '
 

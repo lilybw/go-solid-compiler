@@ -2,7 +2,7 @@ module github.com/lilybw/go-solid-compiler
 
 go 1.27
 
-require github.com/Zzzen/typescript-go v0.0.2-0.20260816012528-ee43cd6605eb
+require github.com/lilybw/typescript-go v0.1.0
 
 require (
 	github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68 // indirect

@@ -3,7 +3,7 @@ package tsx
 import (
 	"strings"
 
-	tsast "github.com/Zzzen/typescript-go/use-at-your-own-risk/ast"
+	tsast "github.com/lilybw/typescript-go/use-at-your-own-risk/ast"
 
 	"github.com/lilybw/go-solid-compiler/ast"
 )
