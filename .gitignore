@@ -1,6 +1,10 @@
 *.test
 *.out
-/dist/
+/dist/*
+!/runtime/dist/*
 .cache/
 .env
 *.patch
+
+*.rasterized.txt
+rasterize.ps1

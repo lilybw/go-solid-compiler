@@ -64,9 +64,6 @@ go get github.com/lilybw/go-solid-compiler
 go generate ./runtime    # fetch the pinned solid-js runtime
 ```
 
-Requires Go 1.26 or later. On Go 1.27 an additional generic-method API becomes
-available automatically.
-
 ## Use with esbuild
 
 The compiler is designed to run inside an esbuild plugin, so the whole build

@@ -1,6 +1,5 @@
-// Package runtime embeds a pinned copy of the solid-js client runtime and
-// resolves imports of it during bundling, so consumers need no npm install
-// and no node_modules directory.
+// Package runtime embeds the solid-js client runtime so that bundling a Solid
+// application needs no npm install and no node_modules directory.
 //
 // The embedded files are not committed by hand. Run
 //
@@ -8,13 +7,17 @@
 //
 // to fetch the pinned release. Transform output is coupled to the runtime
 // version, so changing [Version] means re-running the test suite.
+//
+// Use [github.com/lilybw/go-solid-compiler/esbuildsolid.Runtime] to serve these
+// files to esbuild; [Config.Resolve] is the underlying lookup for other
+// bundlers.
 package runtime
 
 import (
 	"embed"
 	"fmt"
 	"io/fs"
-	"path"
+	"sort"
 	"strings"
 )
 
@@ -23,92 +26,94 @@ import (
 // Version is the solid-js release this runtime was vendored from.
 const Version = "1.9.14"
 
-// dist holds the vendored solid-js ESM build. The all: prefix is required
+// dist holds the vendored solid-js ESM builds. The all: prefix is required
 // because some solid-js files begin with an underscore.
+//
+//go:embed all:dist
 var dist embed.FS
 
-// moduleAliases maps import specifiers to paths inside the embedded tree.
-var moduleAliases = map[string]string{
-	"solid-js":       "dist/solid.js",
-	"solid-js/web":   "dist/web.js",
-	"solid-js/store": "dist/store.js",
-	"solid-js/html":  "dist/html.js",
-	"solid-js/h":     "dist/h.js",
-}
+// Only the client builds are embedded. The server build imports seroval and
+// the storage build imports node:async_hooks, whereas the client builds import
+// nothing outside solid-js itself, which is what lets them be served without a
+// package manager.
+var (
+	production = map[string]string{
+		"solid-js":                 "dist/solid.js",
+		"solid-js/web":             "dist/web.js",
+		"solid-js/store":           "dist/store.js",
+		"solid-js/html":            "dist/html.js",
+		"solid-js/h":               "dist/h.js",
+		"solid-js/jsx-runtime":     "dist/solid.js",
+		"solid-js/jsx-dev-runtime": "dist/solid.js",
+	}
+	development = map[string]string{
+		"solid-js":       "dist/solid.dev.js",
+		"solid-js/web":   "dist/web.dev.js",
+		"solid-js/store": "dist/store.dev.js",
+	}
+)
 
-// Config controls resolution.
+// Config selects which build to serve.
 type Config struct {
-	// Fallback is consulted when a specifier is not part of the embedded
-	// runtime. Returning ("", false) lets the bundler resolve it normally,
-	// which is what allows a consumer to keep a node_modules directory for
-	// their own dependencies while still getting solid-js from here.
-	Fallback func(specifier string) (contents string, ok bool)
+	// Development serves the development builds, which carry Solid's runtime
+	// warnings. Entry points without a development build fall back to the
+	// production one.
+	Development bool
 
-	// Override replaces an embedded module wholesale, which is the escape
-	// hatch for a consumer pinned to a different solid-js version.
+	// Override replaces a module's source entirely, keyed by import specifier.
+	// It is the escape hatch for pinning a different solid-js version without
+	// abandoning the embedded runtime.
 	Override map[string]string
 }
 
-// IsRuntimeModule reports whether a specifier is served by the embedded
-// runtime.
-func IsRuntimeModule(specifier string) bool {
-	if _, ok := moduleAliases[specifier]; ok {
-		return true
-	}
-	return strings.HasPrefix(specifier, "solid-js/")
+// Handles reports whether a specifier is served by the embedded runtime.
+func Handles(specifier string) bool {
+	return specifier == "solid-js" || strings.HasPrefix(specifier, "solid-js/")
 }
 
-// Resolve returns the source of an embedded module. Relative specifiers are
-// resolved against the importer.
-func (c Config) Resolve(specifier, importer string) (string, bool, error) {
-	if c.Override != nil {
-		if src, ok := c.Override[specifier]; ok {
-			return src, true, nil
-		}
+// Resolve returns the source of an embedded module.
+//
+// It reports false for a specifier the runtime does not serve, and an error
+// for one it should serve but cannot, which distinguishes "not mine" from
+// "mine and broken".
+func (c Config) Resolve(specifier string) (string, bool, error) {
+	if src, ok := c.Override[specifier]; ok {
+		return src, true, nil
+	}
+	if !Handles(specifier) {
+		return "", false, nil
 	}
 
-	var target string
-	switch {
-	case strings.HasPrefix(specifier, "./") || strings.HasPrefix(specifier, "../"):
-		if !strings.HasPrefix(importer, "dist/") {
-			return "", false, nil
-		}
-		target = path.Join(path.Dir(importer), specifier)
-	default:
-		alias, ok := moduleAliases[specifier]
-		if !ok {
-			if !strings.HasPrefix(specifier, "solid-js/") {
-				break
-			}
-			alias = "dist/" + strings.TrimPrefix(specifier, "solid-js/") + ".js"
-		}
-		target = alias
+	path := ""
+	if c.Development {
+		path = development[specifier]
 	}
-
-	if target != "" {
-		if src, err := fs.ReadFile(dist, target); err == nil {
-			return string(src), true, nil
-		}
-		if !strings.HasSuffix(target, ".js") {
-			if src, err := fs.ReadFile(dist, target+".js"); err == nil {
-				return string(src), true, nil
-			}
-		}
+	if path == "" {
+		path = production[specifier]
 	}
-
-	if c.Fallback != nil {
-		if src, ok := c.Fallback(specifier); ok {
-			return src, true, nil
-		}
-	}
-
-	if IsRuntimeModule(specifier) {
+	if path == "" {
 		return "", false, fmt.Errorf(
-			"runtime: %q is not present in the embedded solid-js %s; "+
-				"run `go generate ./runtime` to populate it, or supply Config.Override",
-			specifier, Version)
+			"runtime: %q is not part of the embedded solid-js %s (available: %s)",
+			specifier, Version, strings.Join(Specifiers(), ", "))
 	}
-	return "", false, nil
+
+	src, err := fs.ReadFile(dist, path)
+	if err != nil {
+		return "", false, fmt.Errorf(
+			"runtime: %s is missing from the embedded solid-js %s; run `go generate ./runtime`",
+			path, Version)
+	}
+	return string(src), true, nil
+}
+
+// Specifiers lists the import specifiers the embedded runtime serves.
+func Specifiers() []string {
+	out := make([]string, 0, len(production))
+	for s := range production {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Available reports whether the embedded runtime has been populated by
@@ -135,5 +140,6 @@ func Files() []string {
 		}
 		return nil
 	})
+	sort.Strings(out)
 	return out
 }
